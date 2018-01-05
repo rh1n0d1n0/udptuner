@@ -19,12 +19,10 @@ def logger(msg):
     sys.stdout.write('\n' + ' -' * 30 + '\n')
 
 def payload_gen(size, pkt_size, **kwargs):
-    payload = []
-    for packet in range(size):
-        p = (str(packet) + ':').encode('UTF-8')  # Use num as packet header
-        p = p + (b'0' * pkt_size)[:pkt_size]  # pad with 0's
-        payload.append(p)
-    return payload
+    """ Returns an empty payload with x amount of packets """
+    ## Packet format:
+    ## ((id), (timestamp), ('misc'), (padded size))
+    return [{'id':id_, 'timestamp':'', 'misc':kwargs, 'size':pkt_size} for id_ in range(size)]
 
 class udp_sender:
 
@@ -39,9 +37,13 @@ class udp_sender:
         self.counter = 0
 
     def send_payload(self):
-        for packet in self.payload:
-            if type(packet) != bytes:
-                packet = str(packet).encode('UTF-8')
+        for pkt in self.payload:
+            misc = [k + '|' + str(v) for k, v in pkt['misc'].items()]
+            pkt['timestamp'] = str(time.time())
+            header = (pkt['id'] + '|' pkt['timestamp'] + '|' +
+                      misc).encode('utf-8')
+            padding = b'0' * pkt['size']
+            packet = header + padding[:pkt['size'] - len(header)]
             self._send(packet)
 
     def completed(self):
@@ -57,13 +59,13 @@ class udp_sender:
         except socket.error as e:
             self.errors.append(('Packet %s' % self.counter, e))
 
-class sync_server(Thread):
+class server(Thread):
 
     def __init__(self):
         self.socket = None
         self.socket_type = socket.AF_INET
         self.ports = [80, 443, 554, 587, 8080, 9090, 60000]
-        self.handshake_msg = b'UDPTunerSyncMsg'
+        self.handshake_msg = b'#' * 8
 
     def start(self):
         self.run()
@@ -78,13 +80,9 @@ class sync_server(Thread):
         self.socket.close()
         exit()
 
-    def _create_socket(self):
-        try:
-            self.socket = socket.socket(self.socket_type, socket.SOCK_STREAM)
-        except socket.error as e:
-            logger(e)
-
     def _bind(self):
+        self.socket = socket.socket(self.socket_type, socket.SOCK_STREAM)
+        # Failsafe bind
         for port in self.ports:
             try:
                 self.socket.bind(('', port))
@@ -110,10 +108,8 @@ class sync_server(Thread):
     def _handle_client(self):
         addr = self.client_addr
         logger('Received connection from %s on port %s' % (addr[0], addr[1]))
-        self._handshake()
-
-    def _handshake(self):
         logger('Syncing with client . . .')
+        ## Handshake
         self.client_sock.send(self.handshake_msg)
         data = self.client_sock.recv(512)
         if data and data == self.handshake_msg:
@@ -123,6 +119,21 @@ class sync_server(Thread):
             logger('Waiting for new connection . . .')
             self.client_sock.close()
             self._listen()
+
+    def sync_time(self):
+        logger('Syncing time . . .')
+        stamps = ':'.join([str(time.time()) for x in range(30)])
+        self.client_sock.send(stamps.encode('UTF-8'))
+        data = self.client_sock.recv(1024).decode()
+        stamps = stamps.split(':')
+        client_stamps = data.split(':')
+        if len(client_stamps) == 30:
+            stamps = [float(x) for x in stamps]
+            client_stamps = [float(x) for x in client_stamps]
+            deltas = [x - y for x in stamps for y in client_stamps]
+            self.time_delta = sum(deltas)/float(len(deltas))
+            logger('Time Delta: ' + str(round(self.time_delta, 4)) + 'ms')
+            self._start_test()
 
     def _start_test(self):
         payload = payload_gen(60000, 1024)
@@ -143,21 +154,6 @@ class sync_server(Thread):
         data = self.client_sock.recv(512)
         logger(data.decode())
         self.terminate()
-
-    def sync_time(self):
-        logger('Syncing time . . .')
-        stamps = ':'.join([str(time.time()) for x in range(30)])
-        self.client_sock.send(stamps.encode('UTF-8'))
-        data = self.client_sock.recv(1024).decode()
-        stamps = stamps.split(':')
-        client_stamps = data.split(':')
-        if len(client_stamps) == 30:
-            stamps = [float(x) for x in stamps]
-            client_stamps = [float(x) for x in client_stamps]
-            deltas = [x - y for x in stamps for y in client_stamps]
-            self.time_delta = sum(deltas)/float(len(deltas))
-            logger('Time Delta: ' + str(round(self.time_delta, 4)) + 'ms')
-            self._start_test()
 
 class sync_client(sync_server):
 
@@ -247,4 +243,3 @@ if sys.argv[1] == 'server':
 elif sys.argv[1] == 'client':
     client = sync_client(sys.argv[2], int(sys.argv[3]))
     client.start()
-
